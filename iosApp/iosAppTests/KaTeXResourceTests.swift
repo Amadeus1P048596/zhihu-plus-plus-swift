@@ -118,6 +118,9 @@ final class KaTeXResourceTests: XCTestCase {
         XCTAssertTrue(script.contains("maxExpand: 1000"))
         XCTAssertTrue(script.contains("maxSize: 100"))
         XCTAssertTrue(script.contains("throwOnError: true"))
+        XCTAssertTrue(script.contains("displayMode: request.displayMode"))
+        XCTAssertTrue(script.contains("baselineFromTop"))
+        XCTAssertFalse(script.contains("displayMode: true"))
         XCTAssertFalse(script.contains("fetch("))
         XCTAssertFalse(script.contains("XMLHttpRequest"))
     }
@@ -153,7 +156,8 @@ final class KaTeXResourceTests: XCTestCase {
             pointSize: 17,
             color: .lightForeground,
             scale: 2,
-            isDarkMode: false
+            isDarkMode: false,
+            displayMode: true
         )
         XCTAssertThrowsError(try QAKaTeXRenderPolicy.validate(oversized)) { error in
             XCTAssertEqual(error as? QAKaTeXRenderError, .formulaTooLong)
@@ -163,10 +167,21 @@ final class KaTeXResourceTests: XCTestCase {
             try QAKaTeXRenderPolicy.validateOutput(
                 width: QAKaTeXRenderPolicy.maximumLogicalDimension + 1,
                 height: 20,
-                scale: 2
+                scale: 2,
+                baselineFromTop: 15
             )
         ) { error in
             XCTAssertEqual(error as? QAKaTeXRenderError, .outputTooLarge)
+        }
+        XCTAssertThrowsError(
+            try QAKaTeXRenderPolicy.validateOutput(
+                width: 100,
+                height: 20,
+                scale: 2,
+                baselineFromTop: 21
+            )
+        ) { error in
+            XCTAssertEqual(error as? QAKaTeXRenderError, .invalidOutput)
         }
 
         XCTAssertEqual(QAKaTeXRenderPolicy.cacheCountLimit, 128)
@@ -188,6 +203,7 @@ final class KaTeXResourceTests: XCTestCase {
             baseline.cacheKey,
             renderRequest(color: .darkForeground, isDarkMode: true).cacheKey
         )
+        XCTAssertNotEqual(baseline.cacheKey, renderRequest(displayMode: false).cacheKey)
     }
 
     func testMissingResourceIsReportedBeforeRendering() throws {
@@ -223,14 +239,44 @@ final class KaTeXResourceTests: XCTestCase {
         let request = renderRequest()
         let first = try await service.render(request)
         let second = try await service.render(request)
+        let firstImage = first.image
+        let secondImage = second.image
 
-        XCTAssertGreaterThan(first.size.width, 0)
-        XCTAssertGreaterThan(first.size.height, 0)
-        XCTAssertLessThanOrEqual(first.size.width, QAKaTeXRenderPolicy.maximumLogicalDimension)
-        XCTAssertLessThanOrEqual(first.size.height, QAKaTeXRenderPolicy.maximumLogicalDimension)
-        XCTAssertEqual(first.scale, request.scale)
-        XCTAssertTrue(first === second)
-        XCTAssertLessThan(try alphaAtTopLeft(of: first), 16)
+        XCTAssertGreaterThan(firstImage.size.width, 0)
+        XCTAssertGreaterThan(firstImage.size.height, 0)
+        XCTAssertLessThanOrEqual(firstImage.size.width, QAKaTeXRenderPolicy.maximumLogicalDimension)
+        XCTAssertLessThanOrEqual(firstImage.size.height, QAKaTeXRenderPolicy.maximumLogicalDimension)
+        XCTAssertEqual(firstImage.scale, request.scale)
+        XCTAssertGreaterThan(first.baselineFromTop, 0)
+        XCTAssertLessThanOrEqual(first.baselineFromTop, firstImage.size.height)
+        XCTAssertEqual(first.baselineFromTop, second.baselineFromTop)
+        XCTAssertTrue(firstImage === secondImage)
+        XCTAssertLessThan(try alphaAtTopLeft(of: firstImage), 16)
+    }
+
+    @MainActor
+    func testInlineRenderProducesImageWithMeasuredBaseline() async throws {
+        let service = QAKaTeXRenderService(bundle: .main)
+        let request = renderRequest(
+            latex: #"J^{PC}=0^{-+}"#,
+            pointSize: 17,
+            displayMode: false
+        )
+        let result = try await service.render(request)
+
+        XCTAssertFalse(request.displayMode)
+        XCTAssertGreaterThan(result.image.size.width, 0)
+        XCTAssertGreaterThan(result.image.size.height, 0)
+        XCTAssertEqual(result.image.scale, request.scale)
+        XCTAssertTrue(result.baselineFromTop.isFinite)
+        XCTAssertGreaterThan(result.baselineFromTop, 0)
+        XCTAssertLessThan(result.baselineFromTop, result.image.size.height)
+
+        let displayResult = try await service.render(
+            renderRequest(latex: request.latex, pointSize: request.pointSize)
+        )
+        XCTAssertFalse(result.image === displayResult.image)
+        XCTAssertEqual(displayResult.baselineFromTop, displayResult.image.size.height)
     }
 
     private var sourceResourcesURL: URL {
@@ -267,17 +313,20 @@ final class KaTeXResourceTests: XCTestCase {
     }
 
     private func renderRequest(
+        latex: String = #"x^2+\frac{1}{2}"#,
         pointSize: CGFloat = 17,
         color: QAKaTeXRenderColor = .lightForeground,
         scale: CGFloat = 2,
-        isDarkMode: Bool = false
+        isDarkMode: Bool = false,
+        displayMode: Bool = true
     ) -> QAKaTeXRenderRequest {
         QAKaTeXRenderRequest(
-            latex: #"x^2+\frac{1}{2}"#,
+            latex: latex,
             pointSize: pointSize,
             color: color,
             scale: scale,
-            isDarkMode: isDarkMode
+            isDarkMode: isDarkMode,
+            displayMode: displayMode
         )
     }
 

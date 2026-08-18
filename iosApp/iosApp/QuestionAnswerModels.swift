@@ -372,6 +372,9 @@ enum QAMarkdownConverter {
     }
 
     private static func inline(_ run: QAInlineRun) -> String {
+        if let latex = run.formulaLatex {
+            return "$\(latex)$"
+        }
         let characters = Array(run.text)
         guard let firstContent = characters.firstIndex(where: { !$0.isWhitespace }),
               let lastContent = characters.lastIndex(where: { !$0.isWhitespace })
@@ -486,14 +489,37 @@ struct QAInlineStyle: OptionSet, Hashable, Sendable {
 }
 
 struct QAInlineRun: Identifiable, Hashable, Sendable {
+    enum Content: Hashable, Sendable {
+        case text(String)
+        case formula(latex: String)
+    }
+
     let id: UUID
-    let text: String
+    let content: Content
     let style: QAInlineStyle
     let link: QALinkDestination?
 
+    var text: String {
+        switch content {
+        case let .text(value), let .formula(value): return value
+        }
+    }
+
+    var formulaLatex: String? {
+        guard case let .formula(latex) = content else { return nil }
+        return latex
+    }
+
     init(id: UUID = UUID(), text: String, style: QAInlineStyle = [], link: QALinkDestination? = nil) {
         self.id = id
-        self.text = text
+        content = .text(text)
+        self.style = style
+        self.link = link
+    }
+
+    init(id: UUID = UUID(), formulaLatex: String, style: QAInlineStyle = [], link: QALinkDestination? = nil) {
+        self.id = id
+        content = .formula(latex: formulaLatex)
         self.style = style
         self.link = link
     }

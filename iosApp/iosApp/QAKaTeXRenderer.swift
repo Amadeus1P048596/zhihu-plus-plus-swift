@@ -59,8 +59,19 @@ enum QAKaTeXRenderPolicy {
         }
     }
 
-    static func validateOutput(width: CGFloat, height: CGFloat, scale: CGFloat) throws {
+    static func validateOutput(
+        width: CGFloat,
+        height: CGFloat,
+        scale: CGFloat,
+        baselineFromTop: CGFloat
+    ) throws {
         guard width.isFinite, height.isFinite, width > 0, height > 0 else {
+            throw QAKaTeXRenderError.invalidOutput
+        }
+        guard baselineFromTop.isFinite,
+              baselineFromTop > 0,
+              baselineFromTop <= height
+        else {
             throw QAKaTeXRenderError.invalidOutput
         }
         guard width <= maximumLogicalDimension,
@@ -97,19 +108,22 @@ struct QAKaTeXRenderRequest: Hashable, Sendable {
     let color: QAKaTeXRenderColor
     let scale: CGFloat
     let isDarkMode: Bool
+    let displayMode: Bool
 
     init(
         latex: String,
         pointSize: CGFloat,
         color: QAKaTeXRenderColor,
         scale: CGFloat,
-        isDarkMode: Bool
+        isDarkMode: Bool,
+        displayMode: Bool
     ) {
         self.latex = latex
         self.pointSize = pointSize
         self.color = color
         self.scale = scale
         self.isDarkMode = isDarkMode
+        self.displayMode = displayMode
     }
 
     var cacheKey: String {
@@ -125,8 +139,14 @@ struct QAKaTeXRenderRequest: Hashable, Sendable {
             "\(color.red)-\(color.green)-\(color.blue)-\(color.alpha)",
             String(scaleKey),
             isDarkMode ? "dark" : "light",
+            displayMode ? "display" : "inline",
         ].joined(separator: "|")
     }
+}
+
+struct QAKaTeXRenderResult {
+    let image: UIImage
+    let baselineFromTop: CGFloat
 }
 
 enum QAKaTeXResourceLocator {
@@ -183,10 +203,18 @@ final class QAKaTeXRenderService {
     private struct WorkItem {
         let id: UUID
         let request: QAKaTeXRenderRequest
-        let continuation: CheckedContinuation<UIImage, Error>
+        let continuation: CheckedContinuation<QAKaTeXRenderResult, Error>
     }
 
-    private let cache = NSCache<NSString, UIImage>()
+    private final class CachedResult: NSObject {
+        let value: QAKaTeXRenderResult
+
+        init(_ value: QAKaTeXRenderResult) {
+            self.value = value
+        }
+    }
+
+    private let cache = NSCache<NSString, CachedResult>()
     private let engine: QAKaTeXWebEngine
     private var queue: [WorkItem] = []
     private var cancelledWorkIDs: Set<UUID> = []
@@ -198,10 +226,10 @@ final class QAKaTeXRenderService {
         engine = QAKaTeXWebEngine(bundle: bundle)
     }
 
-    func render(_ request: QAKaTeXRenderRequest) async throws -> UIImage {
+    func render(_ request: QAKaTeXRenderRequest) async throws -> QAKaTeXRenderResult {
         try QAKaTeXRenderPolicy.validate(request)
         if let cached = cache.object(forKey: request.cacheKey as NSString) {
-            return cached
+            return cached.value
         }
 
         let workID = UUID()
@@ -241,25 +269,26 @@ final class QAKaTeXRenderService {
                 continue
             }
             if let cached = cache.object(forKey: item.request.cacheKey as NSString) {
-                item.continuation.resume(returning: cached)
+                item.continuation.resume(returning: cached.value)
                 continue
             }
 
             do {
-                let image = try await engine.render(item.request)
+                let result = try await engine.render(item.request)
                 if cancelledWorkIDs.remove(item.id) != nil {
                     item.continuation.resume(throwing: CancellationError())
                     continue
                 }
+                let image = result.image
                 let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
                 if QAKaTeXRenderPolicy.shouldCacheImage(cost: cost) {
                     cache.setObject(
-                        image,
+                        CachedResult(result),
                         forKey: item.request.cacheKey as NSString,
                         cost: cost
                     )
                 }
-                item.continuation.resume(returning: image)
+                item.continuation.resume(returning: result)
             } catch {
                 cancelledWorkIDs.remove(item.id)
                 item.continuation.resume(throwing: error)
@@ -277,6 +306,7 @@ private final class QAKaTeXWebEngine: NSObject, WKNavigationDelegate, WKUIDelega
     private struct RenderMetrics {
         let width: CGFloat
         let height: CGFloat
+        let baselineFromTop: CGFloat
     }
 
     private let resourceDirectoryURL: URL?
@@ -301,7 +331,7 @@ private final class QAKaTeXWebEngine: NSObject, WKNavigationDelegate, WKUIDelega
         webView.scrollView.isScrollEnabled = false
     }
 
-    func render(_ request: QAKaTeXRenderRequest) async throws -> UIImage {
+    func render(_ request: QAKaTeXRenderRequest) async throws -> QAKaTeXRenderResult {
         try Task.checkCancellation()
         try await ensureLoaded()
         try Task.checkCancellation()
@@ -310,7 +340,8 @@ private final class QAKaTeXWebEngine: NSObject, WKNavigationDelegate, WKUIDelega
         try QAKaTeXRenderPolicy.validateOutput(
             width: metrics.width,
             height: metrics.height,
-            scale: request.scale
+            scale: request.scale,
+            baselineFromTop: metrics.baselineFromTop
         )
         webView.frame = CGRect(origin: .zero, size: CGSize(width: metrics.width, height: metrics.height))
         webView.setNeedsLayout()
@@ -325,7 +356,11 @@ private final class QAKaTeXWebEngine: NSObject, WKNavigationDelegate, WKUIDelega
         guard snapshot.size.width > 0, snapshot.size.height > 0 else {
             throw QAKaTeXRenderError.invalidOutput
         }
-        return normalizedImage(snapshot, size: webView.bounds.size, scale: request.scale)
+        let image = normalizedImage(snapshot, size: webView.bounds.size, scale: request.scale)
+        return QAKaTeXRenderResult(
+            image: image,
+            baselineFromTop: metrics.baselineFromTop
+        )
     }
 
     private func ensureLoaded() async throws {
@@ -359,6 +394,7 @@ private final class QAKaTeXWebEngine: NSObject, WKNavigationDelegate, WKUIDelega
                 "pointSize": request.pointSize,
                 "color": request.color.cssValue,
                 "accessibilityLabel": QALatexReadableText.render(request.latex),
+                "displayMode": request.displayMode,
             ],
         ]
         let value = try await webView.callAsyncJavaScript(
@@ -376,10 +412,17 @@ private final class QAKaTeXWebEngine: NSObject, WKNavigationDelegate, WKUIDelega
             let message = (result["error"] as? String).map { String($0.prefix(240)) } ?? "未知错误"
             throw QAKaTeXRenderError.renderingFailed(message)
         }
-        guard let width = number(result["width"]), let height = number(result["height"]) else {
+        guard let width = number(result["width"]),
+              let height = number(result["height"]),
+              let baselineFromTop = number(result["baselineFromTop"])
+        else {
             throw QAKaTeXRenderError.invalidOutput
         }
-        return RenderMetrics(width: width, height: height)
+        return RenderMetrics(
+            width: width,
+            height: height,
+            baselineFromTop: baselineFromTop
+        )
     }
 
     private func number(_ value: Any?) -> CGFloat? {
@@ -462,7 +505,7 @@ private final class QAKaTeXWebEngine: NSObject, WKNavigationDelegate, WKUIDelega
 
 private enum QAKaTeXFormulaPhase {
     case loading
-    case rendered(UIImage)
+    case rendered(QAKaTeXRenderResult)
     case fallback
 }
 
@@ -487,7 +530,8 @@ struct QAKaTeXFormulaView: View {
                 max(displayScale, QAKaTeXRenderPolicy.minimumScale),
                 QAKaTeXRenderPolicy.maximumScale
             ),
-            isDarkMode: colorScheme == .dark
+            isDarkMode: colorScheme == .dark,
+            displayMode: true
         )
     }
 
@@ -529,11 +573,11 @@ struct QAKaTeXFormulaView: View {
             ProgressView()
                 .frame(minWidth: 32, minHeight: pointSize * 1.5)
                 .accessibilityLabel("正在渲染公式")
-        case let .rendered(image):
-            Image(uiImage: image)
+        case let .rendered(result):
+            Image(uiImage: result.image)
                 .resizable()
                 .interpolation(.high)
-                .frame(width: image.size.width, height: image.size.height)
+                .frame(width: result.image.size.width, height: result.image.size.height)
         case .fallback:
             Text(QALatexReadableText.render(latex))
                 .font(.system(size: pointSize, design: .monospaced))

@@ -8,6 +8,23 @@ html, body {
 #formula {
   box-sizing: border-box;
   display: inline-block;
-  padding: 4px;
   white-space: nowrap;
+}
+
+#formula[data-display-mode="display"] {
+  padding: 4px;
+}
+
+#formula[data-display-mode="inline"] {
+  padding: 0;
+}
+
+.baseline-marker {
+  border: 0;
+  display: inline-block;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  vertical-align: baseline;
+  width: 0;
 }

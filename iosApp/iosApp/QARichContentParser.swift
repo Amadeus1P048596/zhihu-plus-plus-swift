@@ -36,6 +36,8 @@ enum QARichContentParser {
         var listStack: [ListContext] = []
         var segmentID: String?
         var spanSegmentScopes: [Bool] = []
+        var spanFormulaScopes: [Bool] = []
+        var formulaSpanDepth = 0
         var preformatted = false
         var preLanguage: String?
         var ignoreDepth = 0
@@ -59,6 +61,7 @@ enum QARichContentParser {
         mutating func consume(_ token: String) {
             guard token.hasPrefix("<") else {
                 guard ignoreDepth == 0 else { return }
+                guard formulaSpanDepth == 0 else { return }
                 let value = decodeText(token, preserveWhitespace: preformatted)
                 if capturingCaption { caption += value; return }
                 appendText(value)
@@ -128,10 +131,14 @@ enum QARichContentParser {
                 } else {
                     spanSegmentScopes.append(false)
                 }
-                if tag.attributes["class"]?.contains("ztext-math") == true,
-                   let latex = tag.attributes["data-tex"] ?? tag.attributes["data-formula"] {
-                    flushBlock()
-                    blocks.append(.formula(UUID(), latex: decodeText(latex, preserveWhitespace: true)))
+                let spanLatex = tag.attributes["class"]?.contains("ztext-math") == true
+                    ? (tag.attributes["data-tex"] ?? tag.attributes["data-formula"])?.nilIfBlank
+                    : nil
+                let isFormula = spanLatex != nil
+                spanFormulaScopes.append(isFormula)
+                if let latex = spanLatex {
+                    appendInlineFormula(latex)
+                    formulaSpanDepth += 1
                 }
             case "video":
                 let source = tag.attributes["src"].flatMap(trustedRemoteURL)
@@ -154,6 +161,9 @@ enum QARichContentParser {
             case "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote":
                 flushBlock()
                 segmentID = nil
+                // Invalid upstream markup must not let a missing formula-span
+                // close tag suppress all text in the following block.
+                formulaSpanDepth = 0
             case "pre":
                 flushBlock()
                 preformatted = false
@@ -177,6 +187,9 @@ enum QARichContentParser {
                     links.removeLast()
                 }
             case "span":
+                if spanFormulaScopes.popLast() == true {
+                    formulaSpanDepth = max(0, formulaSpanDepth - 1)
+                }
                 if spanSegmentScopes.popLast() == true {
                     flushBlock()
                     segmentID = nil
@@ -300,6 +313,19 @@ enum QARichContentParser {
             }
         }
 
+        mutating func appendInlineFormula(_ latex: String) {
+            let run = QAInlineRun(formulaLatex: latex, style: style, link: links.last)
+            if listStack.isEmpty {
+                runs.append(run)
+            } else {
+                let index = listStack.count - 1
+                if !listStack[index].hasOpenItem {
+                    listStack[index].hasOpenItem = true
+                }
+                listStack[index].runs.append(run)
+            }
+        }
+
         mutating func flushBlock() {
             guard let normalized = normalizedRuns(), !normalized.isEmpty else {
                 runs = []
@@ -310,7 +336,12 @@ enum QARichContentParser {
                 blocks.append(.segment(id, segmentID: segmentID, runs: normalized))
             } else {
                 switch currentBlock {
-                case .paragraph: blocks.append(.paragraph(id, normalized))
+                case .paragraph:
+                    if normalized.count == 1, let latex = normalized[0].formulaLatex {
+                        blocks.append(.formula(id, latex: latex))
+                    } else {
+                        blocks.append(.paragraph(id, normalized))
+                    }
                 case let .heading(level): blocks.append(.heading(id, level: level, runs: normalized))
                 case .quote: blocks.append(.quote(id, normalized))
                 case .code:
@@ -329,28 +360,42 @@ enum QARichContentParser {
             guard !sourceRuns.isEmpty else { return nil }
             if preformatted { return sourceRuns }
             var result = sourceRuns
-            while let first = result.first, first.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            while let first = result.first,
+                  first.formulaLatex == nil,
+                  first.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.removeFirst()
             }
-            while let last = result.last, last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            while let last = result.last,
+                  last.formulaLatex == nil,
+                  last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.removeLast()
             }
             guard !result.isEmpty else { return nil }
-            return result.enumerated().map { index, run in
+            return result.enumerated().compactMap { index, run in
+                if run.formulaLatex != nil { return run }
                 var text = run.text.replacingOccurrences(of: "[\\t ]+", with: " ", options: .regularExpression)
-                if index == 0 { text = text.trimmingCharacters(in: .whitespaces) }
-                if index == result.count - 1 { text = text.trimmingCharacters(in: .whitespaces) }
+                if index == 0 {
+                    text = text.replacingOccurrences(of: "^ +", with: "", options: .regularExpression)
+                }
+                if index == result.count - 1 {
+                    text = text.replacingOccurrences(of: " +$", with: "", options: .regularExpression)
+                }
+                guard !text.isEmpty else { return nil }
                 return QAInlineRun(id: run.id, text: text, style: run.style, link: run.link)
-            }.filter { !$0.text.isEmpty }
+            }
         }
 
         mutating func appendImageOrFormula(_ tag: HTMLTag) {
-            let className = tag.attributes["class"] ?? ""
-            if className.contains("ztext-math") || tag.attributes["data-formula"] != nil || tag.attributes["data-tex"] != nil {
-                let latex = tag.attributes["data-formula"] ?? tag.attributes["data-tex"] ?? tag.attributes["alt"]
-                if let latex = latex?.nilIfBlank {
+            if let latex = legacyFormulaLatex(tag) {
+                appendInlineFormula(latex)
+                return
+            }
+            if let formula = zhihuEquationFormula(tag) {
+                if formula.isDisplay, listStack.isEmpty {
                     flushBlock()
-                    blocks.append(.formula(UUID(), latex: decodeText(latex, preserveWhitespace: true)))
+                    blocks.append(.formula(UUID(), latex: formula.latex))
+                } else {
+                    appendInlineFormula(formula.latex)
                 }
                 return
             }
@@ -368,6 +413,29 @@ enum QARichContentParser {
             )
             blocks.append(.image(image))
             figureImageIndex = blocks.count - 1
+        }
+
+        private func legacyFormulaLatex(_ tag: HTMLTag) -> String? {
+            let attributes = tag.attributes
+            let explicitlyTagged = attributes["data-formula"] ?? attributes["data-tex"]
+            if let explicitlyTagged {
+                return explicitlyTagged.nilIfBlank
+            }
+            guard attributes["class"]?.contains("ztext-math") == true else { return nil }
+            return attributes["alt"]?.nilIfBlank
+        }
+
+        private func zhihuEquationFormula(_ tag: HTMLTag) -> (latex: String, isDisplay: Bool)? {
+            guard let marker = tag.attributes["eeimg"], marker == "1" || marker == "2" else {
+                return nil
+            }
+            let candidates = [
+                tag.attributes["data-original"],
+                tag.attributes["data-actualsrc"],
+                tag.attributes["src"],
+            ].compactMap { $0 }
+            guard let latex = candidates.compactMap(equationLatex).first else { return nil }
+            return (latex, marker == "2")
         }
 
         mutating func applyCaptionToFigureImage() {
@@ -509,6 +577,33 @@ enum QARichContentParser {
             value = raw
         }
         return trustedRemoteURL(value)
+    }
+
+    private static func equationLatex(_ raw: String) -> String? {
+        let value = raw.hasPrefix("//") ? "https:\(raw)" : raw
+        guard let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              components.port == nil,
+              components.path == "/equation",
+              let host = components.host?.lowercased(),
+              host == "zhihu.com" || host == "www.zhihu.com",
+              let query = components.percentEncodedQuery
+        else { return nil }
+
+        for field in query.split(separator: "&", omittingEmptySubsequences: false) {
+            let pair = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pair.count == 2,
+                  String(pair[0]).removingPercentEncoding == "tex"
+            else { continue }
+            let formEncoded = String(pair[1]).replacingOccurrences(of: "+", with: "%20")
+            guard let latex = formEncoded.removingPercentEncoding,
+                  !latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+            return latex
+        }
+        return nil
     }
 
     private static func unwrappedZhihuTarget(_ url: URL) -> URL? {

@@ -190,6 +190,141 @@ final class QuestionAnswerFeatureTests: XCTestCase {
         })
     }
 
+    func testParserRecognizesCurrentZhihuEquationImagesAsInlineAndDisplayFormula() throws {
+        let blocks = QARichContentParser.blocks(from: """
+        <p>前文 <img eeimg="1" src="https://www.zhihu.com/equation?tex=q%5Cbar+q" alt="q bar q"> 后文</p>
+        <p> \n <img eeimg="1" src="//zhihu.com/equation?tex=x%2By" alt="x+y"> \n </p>
+        <img eeimg="2" src="https://www.zhihu.com/equation?tex=%5Csum_%7Bi%3D1%7D%5En" alt="sum">
+        """)
+
+        XCTAssertEqual(blocks.count, 3)
+        guard case let .paragraph(_, runs) = blocks[0] else {
+            return XCTFail("expected mixed inline paragraph")
+        }
+        XCTAssertEqual(runs.compactMap(\.formulaLatex), [#"q\bar q"#])
+        XCTAssertEqual(runs.map(\.text).joined(), #"前文 q\bar q 后文"#)
+        XCTAssertEqual(runs.first(where: { $0.formulaLatex != nil })?.content, .formula(latex: #"q\bar q"#))
+        XCTAssertTrue(runs.first(where: { $0.formulaLatex == nil })?.content == .text("前文 "))
+        XCTAssertTrue(blocks.contains { if case .formula(_, "x+y") = $0 { return true }; return false })
+        XCTAssertTrue(blocks.contains { if case .formula(_, #"\sum_{i=1}^n"#) = $0 { return true }; return false })
+        XCTAssertFalse(blocks.contains { if case .image = $0 { return true }; return false })
+    }
+
+    func testParserKeepsCurrentEquationInlineInsideListItem() throws {
+        let blocks = QARichContentParser.blocks(from: """
+        <ul><li>左侧<img eeimg="1" src="//www.zhihu.com/equation?tex=a%2Bb">右侧</li></ul>
+        """)
+
+        guard case let .list(_, .unordered, items) = try XCTUnwrap(blocks.first) else {
+            return XCTFail("expected list")
+        }
+        let runs = try XCTUnwrap(items.first).runs
+        XCTAssertEqual(runs.compactMap(\.formulaLatex), ["a+b"])
+        XCTAssertEqual(runs.map(\.text).joined(), "左侧a+b右侧")
+        XCTAssertFalse(blocks.contains { if case .formula = $0 { return true }; return false })
+    }
+
+    func testParserMatchesReportedAnswerFormulaShape() {
+        let formulas: [(tex: String, sole: Bool)] = [
+            ("X%282370%29", false),
+            ("J%5E%7BPC%7D%3D0%5E%7B-%2B%7D", false),
+            ("q%5Cbar+q", false),
+            ("X%282370%29", false),
+            ("+X%282370%29", false),
+            ("J%2F%5Cpsi%5Cto%5Cgamma%5Cpi%5E%2B%5Cpi%5E-%5Ceta%27", true),
+            ("+X%282370%29", false),
+            ("+6.4%5Csigma", false),
+            ("+J%2F%5Cpsi", false),
+            ("J%2F%5Cpsi%5Cto%5Cgamma+K_S%5E0K_S%5E0%5Ceta%27", true),
+            ("+X%282370%29", false),
+        ]
+        let html = formulas.enumerated().map { index, formula in
+            let image = #"<img eeimg="1" src="https://www.zhihu.com/equation?tex=\#(formula.tex)"/>"#
+            return formula.sole
+                ? #"<p data-pid="sole-\#(index)">\#(image) </p>"#
+                : #"<p data-pid="mixed-\#(index)">正文 \#(image) 后文</p>"#
+        }.joined()
+
+        let blocks = QARichContentParser.blocks(from: html)
+        let inlineFormulaCount = blocks.reduce(into: 0) { count, block in
+            guard case let .paragraph(_, runs) = block else { return }
+            count += runs.compactMap(\.formulaLatex).count
+        }
+        let blockFormulaCount = blocks.reduce(into: 0) { count, block in
+            if case .formula = block { count += 1 }
+        }
+        let imageCount = blocks.reduce(into: 0) { count, block in
+            if case .image = block { count += 1 }
+        }
+
+        XCTAssertEqual(inlineFormulaCount, 9)
+        XCTAssertEqual(blockFormulaCount, 2)
+        XCTAssertEqual(imageCount, 0)
+    }
+
+    func testParserPreservesOldFormulaMarkupAndDecodesHTMLEntitiesOnce() throws {
+        let blocks = QARichContentParser.blocks(from: """
+        <p>旧格式 <span class="ztext-math" data-tex="a&amp;amp;b"></span>
+        和 <img data-formula="c&amp;d"> <span data-tex="普通元数据">保留正文</span></p>
+        <p><span class="ztext-math" data-tex="x^2">不应重复的 fallback</span></p>
+        """)
+
+        guard case let .paragraph(_, runs) = try XCTUnwrap(blocks.first) else {
+            return XCTFail("expected paragraph")
+        }
+        XCTAssertEqual(runs.compactMap(\.formulaLatex), ["a&amp;b", "c&d"])
+        XCTAssertTrue(runs.map(\.text).joined().contains("保留正文"))
+        XCTAssertFalse(runs.map(\.text).joined().contains("普通元数据"))
+        XCTAssertTrue(blocks.contains { if case .formula(_, "x^2") = $0 { return true }; return false })
+        XCTAssertFalse(blocks.contains { block in
+            guard case let .paragraph(_, values) = block else { return false }
+            return values.map(\.text).joined().contains("不应重复")
+        })
+    }
+
+    func testParserContainsUnclosedLegacyFormulaFallbackToItsBlock() {
+        let blocks = QARichContentParser.blocks(from: """
+        <p><span class="ztext-math" data-tex="x^2">fallback</p>
+        <p>后续正文仍然保留</p>
+        """)
+
+        XCTAssertTrue(blocks.contains { if case .formula(_, "x^2") = $0 { return true }; return false })
+        XCTAssertTrue(blocks.contains { block in
+            guard case let .paragraph(_, runs) = block else { return false }
+            return runs.map(\.text).joined().contains("后续正文仍然保留")
+        })
+    }
+
+    func testParserFormDecodesEquationQueryOnceAndRejectsSpoofedEndpoints() {
+        let valid = QARichContentParser.blocks(from: """
+        <p><img eeimg="1" src="https://www.zhihu.com/equation?other=1&amp;tex=a%26b%252B"></p>
+        """)
+        XCTAssertTrue(valid.contains { if case .formula(_, "a&b%2B") = $0 { return true }; return false })
+        XCTAssertFalse(valid.contains { if case .image = $0 { return true }; return false })
+
+        let leadingSpace = QARichContentParser.blocks(from: """
+        <p>行内<img eeimg="1" src="https://www.zhihu.com/equation?tex=+X%282370%29"></p>
+        """)
+        guard let firstLeadingSpaceBlock = leadingSpace.first,
+              case let .paragraph(_, leadingSpaceRuns) = firstLeadingSpaceBlock
+        else {
+            return XCTFail("expected inline formula paragraph")
+        }
+        XCTAssertEqual(leadingSpaceRuns.compactMap(\.formulaLatex), [" X(2370)"])
+
+        let spoofed = QARichContentParser.blocks(from: """
+        <img eeimg="1" src="https://www.zhihu.com.evil/equation?tex=x">
+        <img eeimg="2" src="https://zhihu.com:443/equation?tex=y">
+        <img eeimg="1" src="https://www.zhihu.com/equation/extra?tex=z">
+        <img eeimg="1" src="http://www.zhihu.com/equation?tex=ignored">
+        """)
+        XCTAssertFalse(spoofed.contains { if case .formula = $0 { return true }; return false })
+        XCTAssertEqual(spoofed.compactMap { block -> URL? in
+            guard case let .image(image) = block else { return nil }
+            return image.url
+        }.count, 3)
+    }
+
     func testParserIgnoresNoscriptDuplicateAndRejectsDataImage() {
         let blocks = QARichContentParser.blocks(
             from: #"<figure><noscript><img src="https://pic.zhimg.com/duplicate.jpg"></noscript><img src="data:image/svg+xml,x" data-actualsrc="https://pic.zhimg.com/real.jpg"></figure>"#
@@ -346,6 +481,8 @@ final class QuestionAnswerFeatureTests: XCTestCase {
         let blocks: [QABodyBlock] = [
             .paragraph(UUID(), [
                 QAInlineRun(text: "普通 * 文本 "),
+                QAInlineRun(formulaLatex: "E=mc^2"),
+                QAInlineRun(text: " "),
                 QAInlineRun(text: "加粗", style: .strong),
                 QAInlineRun(text: " 强调", style: .emphasis),
                 QAInlineRun(text: " 删除", style: .strikethrough, link: .question(7)),
@@ -377,7 +514,7 @@ final class QuestionAnswerFeatureTests: XCTestCase {
         XCTAssertEqual(
             QAMarkdownConverter.blocks(blocks),
             """
-            普通 \\* 文本 **加粗** *强调* [~~删除~~](https://www.zhihu.com/question/7) ``code`value``
+            普通 \\* 文本 $E=mc^2$ **加粗** *强调* [~~删除~~](https://www.zhihu.com/question/7) ``code`value``
 
             ### 小节
 
