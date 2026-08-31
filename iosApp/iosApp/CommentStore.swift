@@ -126,11 +126,18 @@ final class CommentSessionStore: ObservableObject {
 
     func navigationPathChanged(_ path: [CommentLevelKey]) {
         guard !isDisposed else { return }
+        let previousLevel = activeLevel
+        let nextPath = Array(path.prefix(1))
+        let nextLevel = nextPath.last ?? .root
         cancelActiveSubmissionForLevelChange()
         dismissComposer(for: activeLevel)
         preserveActiveDraft()
-        navigationPath = Array(path.prefix(1))
-        draft = drafts[activeLevel] ?? CommentComposerDraft()
+        if previousLevel != nextLevel,
+           galleryDestination?.sourceLevel == previousLevel {
+            galleryDestination = nil
+        }
+        navigationPath = nextPath
+        draft = drafts[nextLevel] ?? CommentComposerDraft()
         draft.replyTargetCommentID = nil
     }
 
@@ -306,16 +313,36 @@ final class CommentSessionStore: ObservableObject {
         onOpenPerson(route)
     }
 
-    func openMedia(commentID: String, mediaID: CommentMediaDTO.ID) {
+    func openMedia(
+        commentID: String,
+        mediaID: CommentMediaDTO.ID,
+        level requestedLevel: CommentLevelKey? = nil
+    ) {
+        let level = requestedLevel ?? activeLevel
         guard !isDisposed,
+              level == activeLevel,
               let comment = commentInSession(withID: commentID),
-              let destination = CommentMediaGalleryDestination(media: comment.media, selectedID: mediaID)
+              let destination = CommentMediaGalleryDestination(
+                media: comment.media,
+                selectedID: mediaID,
+                sourceLevel: level
+              )
         else { return }
         galleryDestination = destination
     }
 
-    func galleryBindingChanged(to destination: CommentMediaGalleryDestination?) {
-        if destination == nil { galleryDestination = nil }
+    func galleryDestination(for level: CommentLevelKey) -> CommentMediaGalleryDestination? {
+        guard galleryDestination?.sourceLevel == level else { return nil }
+        return galleryDestination
+    }
+
+    func galleryBindingChanged(
+        to destination: CommentMediaGalleryDestination?,
+        for level: CommentLevelKey
+    ) {
+        if destination == nil, galleryDestination?.sourceLevel == level {
+            galleryDestination = nil
+        }
     }
 
     func updateAnchor(_ anchor: CommentScrollAnchor?, for level: CommentLevelKey) {

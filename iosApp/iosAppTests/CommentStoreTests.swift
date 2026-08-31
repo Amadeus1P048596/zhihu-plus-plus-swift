@@ -169,6 +169,56 @@ final class CommentStoreTests: XCTestCase {
         XCTAssertEqual(store.composerPresentation, .hidden)
     }
 
+    func testReplyMediaGalleryIsScopedToReplySheetAndClearedWhenRepliesDismiss() async throws {
+        let rootMedia = CommentMediaDTO(
+            kind: .image,
+            url: URL(string: "https://pic.zhimg.com/root.jpg")!
+        )
+        let replyMedia = CommentMediaDTO(
+            kind: .image,
+            url: URL(string: "https://pic.zhimg.com/reply.jpg")!
+        )
+        let root = fixtureComment(id: "root", childCount: 1, media: [rootMedia])
+        let reply = fixtureComment(id: "reply", media: [replyMedia])
+        let repository = CommentRepositoryStub(pages: [
+            .success(CommentPageResult(items: [root], nextURL: nil, isEnd: true)),
+            .success(CommentPageResult(items: [reply], nextURL: nil, isEnd: true)),
+        ])
+        let store = makeStore(repository: repository)
+        let replyLevel = CommentLevelKey.replies(rootCommentID: "root")
+
+        store.start()
+        await waitUntil { store.pages[.root]?.initialLoad == .loaded }
+        store.openMedia(commentID: "root", mediaID: rootMedia.id, level: .root)
+
+        XCTAssertEqual(store.galleryDestination(for: .root)?.urls, [rootMedia.url])
+        XCTAssertNil(store.galleryDestination(for: replyLevel))
+        store.galleryBindingChanged(to: nil, for: replyLevel)
+        XCTAssertNotNil(store.galleryDestination(for: .root))
+        store.galleryBindingChanged(to: nil, for: .root)
+
+        store.openReplies(rootCommentID: "root")
+        await waitUntil { store.pages[replyLevel]?.initialLoad == .loaded }
+        store.openMedia(commentID: "reply", mediaID: replyMedia.id, level: replyLevel)
+
+        XCTAssertNil(store.galleryDestination(for: .root))
+        XCTAssertEqual(
+            try XCTUnwrap(store.galleryDestination(for: replyLevel)).urls,
+            [replyMedia.url]
+        )
+        store.galleryBindingChanged(to: nil, for: .root)
+        XCTAssertNotNil(store.galleryDestination(for: replyLevel))
+        store.galleryBindingChanged(to: nil, for: replyLevel)
+        XCTAssertEqual(store.activeLevel, replyLevel)
+
+        store.openMedia(commentID: "reply", mediaID: replyMedia.id, level: replyLevel)
+        store.dismissReplies()
+
+        XCTAssertEqual(store.activeLevel, .root)
+        XCTAssertNil(store.galleryDestination(for: replyLevel))
+        XCTAssertNil(store.galleryDestination(for: .root))
+    }
+
     func testCancelTargetedReplyClearsTargetAndHidesComposer() async {
         let repository = CommentRepositoryStub(pages: [
             .success(CommentPageResult(items: [fixtureComment(id: "root")], nextURL: nil, isEnd: true)),
@@ -350,7 +400,8 @@ final class CommentStoreTests: XCTestCase {
         id: String,
         liked: Bool = false,
         likes: Int = 0,
-        childCount: Int = 0
+        childCount: Int = 0,
+        media: [CommentMediaDTO] = []
     ) -> CommentDTO {
         CommentDTO(
             id: id,
@@ -362,7 +413,7 @@ final class CommentStoreTests: XCTestCase {
             likeCount: likes,
             childCommentCount: childCount,
             embeddedReplies: [],
-            media: []
+            media: media
         )
     }
 

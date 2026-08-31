@@ -26,9 +26,14 @@ final class NativeMediaGalleryTests: XCTestCase {
         ]
 
         let destination = try XCTUnwrap(
-            CommentMediaGalleryDestination(media: media, selectedID: media[1].id)
+            CommentMediaGalleryDestination(
+                media: media,
+                selectedID: media[1].id,
+                sourceLevel: .replies(rootCommentID: "root")
+            )
         )
 
+        XCTAssertEqual(destination.sourceLevel, .replies(rootCommentID: "root"))
         XCTAssertEqual(destination.urls, media.map(\.url))
         XCTAssertEqual(destination.initialIndex, 1)
     }

@@ -283,14 +283,20 @@ struct CommentUserMessage: Identifiable, Equatable {
 
 struct CommentMediaGalleryDestination: Identifiable, Equatable {
     let id = UUID()
+    let sourceLevel: CommentLevelKey
     let urls: [URL]
     let initialIndex: Int
 
-    init?(media: [CommentMediaDTO], selectedID: CommentMediaDTO.ID) {
+    init?(
+        media: [CommentMediaDTO],
+        selectedID: CommentMediaDTO.ID,
+        sourceLevel: CommentLevelKey
+    ) {
         let urls = media.map(\.url)
         guard !urls.isEmpty,
               let initialIndex = media.firstIndex(where: { $0.id == selectedID })
         else { return nil }
+        self.sourceLevel = sourceLevel
         self.urls = urls
         self.initialIndex = initialIndex
     }

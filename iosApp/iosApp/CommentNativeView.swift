@@ -87,25 +87,14 @@ private struct CommentThreadContainer: View {
             .navigationDestination(isPresented: rootPersonBinding) {
                 if let personModel { PersonNativeView(model: personModel) }
             }
-        .sheet(item: replyDestinationBinding) { destination in
+        .modifier(CommentMediaGalleryPresentationModifier(store: store, level: .root))
+        .sheet(item: replyDestinationBinding, onDismiss: closeReplies) { destination in
             CommentReplySheetView(
                 store: store,
                 level: destination.level,
                 personModel: personModel,
                 personBindingChanged: personBindingChanged,
                 close: closeReplies
-            )
-        }
-        .fullScreenCover(
-            item: Binding(
-                get: { store.galleryDestination },
-                set: { store.galleryBindingChanged(to: $0) }
-            )
-        ) { destination in
-            NativeMediaGallery(
-                urls: destination.urls,
-                initialIndex: destination.initialIndex,
-                accessibilityPrefix: "comment_media"
             )
         }
         .alert(
@@ -182,10 +171,10 @@ private struct CommentReplySheetView: View {
             .contentShape(Rectangle())
             .simultaneousGesture(edgeDismissGesture(containerWidth: geometry.size.width))
         }
+        .modifier(CommentMediaGalleryPresentationModifier(store: store, level: level))
         .background(Color(uiColor: .systemBackground).ignoresSafeArea())
         .modifier(CommentSheetPresentationModifier())
         .accessibilityIdentifier("comment_reply_sheet")
-        .onDisappear(perform: close)
     }
 
     private var personBinding: Binding<Bool> {
@@ -213,6 +202,26 @@ private struct CommentReplySheetView: View {
                 transaction.disablesAnimations = reduceMotion
                 withTransaction(transaction, close)
             }
+    }
+}
+
+private struct CommentMediaGalleryPresentationModifier: ViewModifier {
+    @ObservedObject var store: CommentSessionStore
+    let level: CommentLevelKey
+
+    func body(content: Content) -> some View {
+        content.fullScreenCover(
+            item: Binding(
+                get: { store.galleryDestination(for: level) },
+                set: { store.galleryBindingChanged(to: $0, for: level) }
+            )
+        ) { destination in
+            NativeMediaGallery(
+                urls: destination.urls,
+                initialIndex: destination.initialIndex,
+                accessibilityPrefix: "comment_media"
+            )
+        }
     }
 }
 
@@ -552,7 +561,13 @@ private struct CommentRow: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 8) {
                         ForEach(comment.media) { media in
-                            Button { store.openMedia(commentID: comment.id, mediaID: media.id) } label: {
+                            Button {
+                                store.openMedia(
+                                    commentID: comment.id,
+                                    mediaID: media.id,
+                                    level: interactionLevel
+                                )
+                            } label: {
                                 Group {
                                     if media.kind == .animatedImage ||
                                         NativeRemoteMediaPolicy.isAnimatedImage(media.url) {
