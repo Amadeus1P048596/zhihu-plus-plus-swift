@@ -104,6 +104,10 @@ In Xcode:
 
 The Xcode target builds only the native Swift sources registered under `iosApp/iosApp` and has no Gradle build phase.
 
+The image viewer leaves native pinch handling to `UIScrollView`. Custom Objective-C gesture targets must use viewer-specific selectors such as `handleGalleryPinch:`: naming a subclass target `handlePinch:` shadows UIKit's native handler and disables gesture-driven zoom even though double-tap zoom and panning still work.
+
+Image-load waiters check cancellation before decoding a shared result, without cancelling another live waiter's request. If the viewport changes during zoom, deferred layout preserves the focal point using the current visible bounds rather than the old viewport size.
+
 ## CLI Device Build
 
 For CLI self-signing, pass `TEAM_ID=<YOUR_TEAM_ID>` explicitly. Leave `BUNDLE_ID` unset unless the default bundle identifier is unavailable for your team or you intentionally want to override it.
