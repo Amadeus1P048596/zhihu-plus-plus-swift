@@ -659,6 +659,64 @@ final class QuestionAnswerFeatureTests: XCTestCase {
         XCTAssertEqual(json["is_only_video"] as? Bool, true)
     }
 
+    func testVideoRepositoryDecodesMixedIntegerAndFractionalBitrates() async throws {
+        // Preserve the six candidates from the reported video's play_info response,
+        // with signed playback URLs replaced by stable fixture URLs.
+        let payload = Data(#"""
+        {"video_play":{"playlist":{"mp4":[
+            {"codec":"H265","width":480,"height":852,"bitrate":468,"url":["https://vdn5.vzuu.com/480p-h265.mp4"]},
+            {"codec":"H265","width":720,"height":1280,"bitrate":699,"url":["https://vdn5.vzuu.com/720p-h265.mp4"]},
+            {"codec":"H265","width":1080,"height":1920,"bitrate":1102,"url":["https://vdn5.vzuu.com/1080p-h265.mp4"]},
+            {"codec":"H264","width":476,"height":848,"bitrate":843.236,"url":["https://vdn3.vzuu.com/480p-h264.mp4"]},
+            {"codec":"H264","width":720,"height":1280,"bitrate":1457.447,"url":["https://vdn3.vzuu.com/720p-h264.mp4"]},
+            {"codec":"H264","width":1080,"height":1920,"bitrate":2641.523,"url":["https://vdn3.vzuu.com/1080p-h264.mp4"]}
+        ]}}}
+        """#.utf8)
+        QAURLProtocol.setHandler { _ in (200, payload, [:]) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [QAURLProtocol.self]
+        let client = ZhihuAPIClient(
+            accountStore: QAAccountStore(),
+            session: URLSession(configuration: configuration)
+        )
+        let repository = URLSessionNativeVideoRepository(client: client)
+
+        let playbackURL = try await repository.resolvePlaybackURL(for: .init(
+            contentID: 42,
+            videoID: 99,
+            contentType: .answer
+        ))
+
+        XCTAssertEqual(playbackURL, URL(string: "https://vdn3.vzuu.com/1080p-h264.mp4"))
+    }
+
+    func testVideoRepositoryPreservesFractionalOrderingAndFiltersUntrustedCandidates() async throws {
+        let payload = Data(#"""
+        {"video_play":{"playlist":{"mp4":[
+            {"bitrate":843.236,"url":["https://video.vzuu.com/low.mp4"]},
+            {"bitrate":9000.9,"url":["https://attacker.example/video.mp4"]},
+            {"bitrate":843.947,"url":["https://video.vzuu.com/high.mp4"]},
+            {"bitrate":843.523,"url":["https://video.vzuu.com/middle.mp4"]}
+        ]}}}
+        """#.utf8)
+        QAURLProtocol.setHandler { _ in (200, payload, [:]) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [QAURLProtocol.self]
+        let client = ZhihuAPIClient(
+            accountStore: QAAccountStore(),
+            session: URLSession(configuration: configuration)
+        )
+        let repository = URLSessionNativeVideoRepository(client: client)
+
+        let playbackURL = try await repository.resolvePlaybackURL(for: .init(
+            contentID: 42,
+            videoID: 99,
+            contentType: .answer
+        ))
+
+        XCTAssertEqual(playbackURL, URL(string: "https://video.vzuu.com/high.mp4"))
+    }
+
     func testVideoRepositoryRejectsUntrustedPlaybackHost() async {
         QAURLProtocol.setHandler { _ in
             (
