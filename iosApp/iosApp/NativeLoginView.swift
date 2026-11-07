@@ -258,8 +258,43 @@ enum NativeLoginWebSessionPolicy {
     static func makeConfiguration() -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        #if targetEnvironment(simulator)
+        // Some simulator runtimes fail to render CJK through WebKit's system font aliases.
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: simulatorFontFallbackScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false,
+            in: .defaultClient
+        ))
+        #endif
         return configuration
     }
+
+    #if targetEnvironment(simulator)
+    private static let simulatorFontFallbackScript = """
+    (() => {
+        const host = location.hostname.toLowerCase();
+        if (host !== 'zhihu.com' && !host.endsWith('.zhihu.com')) return;
+
+        const installStyle = () => {
+            if (!document.documentElement) return false;
+            const style = document.createElement('style');
+            const fontFamily = '"PingFang SC", "Helvetica Neue", sans-serif';
+            style.textContent =
+                ':root { --zFontSansSerif: ' + fontFamily + ' !important; }' +
+                'html body { font-family: ' + fontFamily + ' !important; }';
+            document.documentElement.appendChild(style);
+            return true;
+        };
+
+        if (installStyle()) return;
+        const observer = new MutationObserver(() => {
+            if (installStyle()) observer.disconnect();
+        });
+        observer.observe(document, { childList: true });
+    })();
+    """
+    #endif
 }
 
 private struct NativeLoginWebView: UIViewRepresentable {
